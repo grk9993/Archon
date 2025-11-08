@@ -20,8 +20,18 @@ class ConfigurationError(Exception):
 class EnvironmentConfig:
     """Configuration loaded from environment variables."""
 
-    supabase_url: str
-    supabase_service_key: str
+    # Database configuration (either Supabase or PostgreSQL)
+    supabase_url: str | None = None
+    supabase_service_key: str | None = None
+
+    # PostgreSQL configuration (alternative to Supabase)
+    postgres_host: str | None = None
+    postgres_port: int | None = None
+    postgres_db: str | None = None
+    postgres_user: str | None = None
+    postgres_password: str | None = None
+    postgres_url: str | None = None  # Full connection URL alternative
+
     port: int  # Required - no default
     openai_api_key: str | None = None
     host: str = "0.0.0.0"
@@ -152,52 +162,123 @@ def validate_supabase_url(url: str) -> bool:
     return True
 
 
+def validate_postgres_config_available() -> bool:
+    """Check if PostgreSQL configuration is available."""
+    # Check for full URL first
+    if os.getenv("POSTGRES_URL"):
+        return True
+
+    # Check for individual components
+    return bool(
+        os.getenv("POSTGRES_DB") and
+        os.getenv("POSTGRES_USER") and
+        os.getenv("POSTGRES_PASSWORD")
+    )
+
+
+def validate_supabase_config_available() -> bool:
+    """Check if Supabase configuration is available."""
+    return bool(
+        os.getenv("SUPABASE_URL") and
+        os.getenv("SUPABASE_SERVICE_KEY")
+    )
+
+
 def load_environment_config() -> EnvironmentConfig:
     """Load and validate environment configuration."""
     # OpenAI API key is optional at startup - can be set via API
     openai_api_key = os.getenv("OPENAI_API_KEY")
 
-    # Required environment variables for database access
-    supabase_url = os.getenv("SUPABASE_URL")
-    if not supabase_url:
-        raise ConfigurationError("SUPABASE_URL environment variable is required")
+    # Check which database configuration is available
+    has_postgres = validate_postgres_config_available()
+    has_supabase = validate_supabase_config_available()
 
-    supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not supabase_service_key:
-        raise ConfigurationError("SUPABASE_SERVICE_KEY environment variable is required")
+    if not has_postgres and not has_supabase:
+        raise ConfigurationError(
+            "No database configuration found. Please set either:\n"
+            "1. PostgreSQL configuration (recommended):\n"
+            "   - POSTGRES_URL=postgresql://user:pass@host:port/db\n"
+            "   OR\n"
+            "   - POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD\n"
+            "\n"
+            "2. Supabase configuration (legacy):\n"
+            "   - SUPABASE_URL=https://your-project.supabase.co\n"
+            "   - SUPABASE_SERVICE_KEY=your-service-role-key\n"
+            "\n"
+            "PostgreSQL is recommended for better performance and cost savings."
+        )
 
-    # Validate required fields
-    if openai_api_key:
-        validate_openai_api_key(openai_api_key)
-    validate_supabase_url(supabase_url)
+    if has_postgres and has_supabase:
+        search_logger.warning(
+            "Both PostgreSQL and Supabase configurations found. Using PostgreSQL configuration."
+        )
 
-    # Validate Supabase key type
-    is_valid_key, key_message = validate_supabase_key(supabase_service_key)
-    if not is_valid_key:
-        if key_message == "ANON_KEY_DETECTED":
-            raise ConfigurationError(
-                "CRITICAL: You are using a Supabase ANON key instead of a SERVICE key.\n\n"
-                "The ANON key is a public key with read-only permissions that cannot write to the database.\n"
-                "This will cause all database operations to fail with 'permission denied' errors.\n\n"
-                "To fix this:\n"
-                "1. Go to your Supabase project dashboard\n"
-                "2. Navigate to Settings > API keys\n"
-                "3. Find the 'service_role' key (NOT the 'anon' key)\n"
-                "4. Update your SUPABASE_SERVICE_KEY environment variable\n\n"
-                "Key characteristics:\n"
-                "- ANON key: Starts with 'eyJ...' and has role='anon' (public, read-only)\n"
-                "- SERVICE key: Starts with 'eyJ...' and has role='service_role' (private, full access)\n\n"
-                "Current key role detected: anon"
-            )
-        elif key_message.startswith("UNKNOWN_KEY_TYPE:"):
-            role = key_message.split(":", 1)[1]
-            raise ConfigurationError(
-                f"CRITICAL: Unknown Supabase key role '{role}'.\n\n"
-                f"Expected 'service_role' but found '{role}'.\n"
-                f"This key type is not supported and will likely cause failures.\n\n"
-                f"Please use a valid service_role key from your Supabase dashboard."
-            )
-        # For UNABLE_TO_VALIDATE, we continue silently
+    # PostgreSQL configuration
+    postgres_config = {}
+    if has_postgres:
+        postgres_url = os.getenv("POSTGRES_URL")
+        postgres_host = os.getenv("POSTGRES_HOST", "localhost")
+        postgres_port = int(os.getenv("POSTGRES_PORT", "5432"))
+        postgres_db = os.getenv("POSTGRES_DB")
+        postgres_user = os.getenv("POSTGRES_USER")
+        postgres_password = os.getenv("POSTGRES_PASSWORD")
+
+        postgres_config = {
+            "postgres_url": postgres_url,
+            "postgres_host": postgres_host,
+            "postgres_port": postgres_port,
+            "postgres_db": postgres_db,
+            "postgres_user": postgres_user,
+            "postgres_password": postgres_password,
+        }
+
+    # Supabase configuration (legacy)
+    supabase_config = {}
+    if has_supabase and not has_postgres:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+        if not supabase_url:
+            raise ConfigurationError("SUPABASE_URL environment variable is required")
+
+        if not supabase_service_key:
+            raise ConfigurationError("SUPABASE_SERVICE_KEY environment variable is required")
+
+        # Validate required fields
+        validate_supabase_url(supabase_url)
+
+        # Validate Supabase key type
+        is_valid_key, key_message = validate_supabase_key(supabase_service_key)
+        if not is_valid_key:
+            if key_message == "ANON_KEY_DETECTED":
+                raise ConfigurationError(
+                    "CRITICAL: You are using a Supabase ANON key instead of a SERVICE key.\n\n"
+                    "The ANON key is a public key with read-only permissions that cannot write to the database.\n"
+                    "This will cause all database operations to fail with 'permission denied' errors.\n\n"
+                    "To fix this:\n"
+                    "1. Go to your Supabase project dashboard\n"
+                    "2. Navigate to Settings > API keys\n"
+                    "3. Find the 'service_role' key (NOT the 'anon' key)\n"
+                    "4. Update your SUPABASE_SERVICE_KEY environment variable\n\n"
+                    "Key characteristics:\n"
+                    "- ANON key: Starts with 'eyJ...' and has role='anon' (public, read-only)\n"
+                    "- SERVICE key: Starts with 'eyJ...' and has role='service_role' (private, full access)\n\n"
+                    "Current key role detected: anon"
+                )
+            elif key_message.startswith("UNKNOWN_KEY_TYPE:"):
+                role = key_message.split(":", 1)[1]
+                raise ConfigurationError(
+                    f"CRITICAL: Unknown Supabase key role '{role}'.\n\n"
+                    f"Expected 'service_role' but found '{role}'.\n"
+                    f"This key type is not supported and will likely cause failures.\n\n"
+                    f"Please use a valid service_role key from your Supabase dashboard."
+                )
+            # For UNABLE_TO_VALIDATE, we continue silently
+
+        supabase_config = {
+            "supabase_url": supabase_url,
+            "supabase_service_key": supabase_service_key,
+        }
 
     # Optional environment variables with defaults
     host = os.getenv("HOST", "0.0.0.0")
@@ -221,11 +302,11 @@ def load_environment_config() -> EnvironmentConfig:
 
     return EnvironmentConfig(
         openai_api_key=openai_api_key,
-        supabase_url=supabase_url,
-        supabase_service_key=supabase_service_key,
         host=host,
         port=port,
         transport=transport,
+        **postgres_config,
+        **supabase_config,
     )
 
 
